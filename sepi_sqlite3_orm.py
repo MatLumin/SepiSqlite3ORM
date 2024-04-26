@@ -2,15 +2,17 @@ from __future__ import annotations;
 
 from typing import *;
 import sqlite3;
+import time;
 #=============================
 STRING_LITERAL_QUOTATION_MARK = '"';
 SLQM = STRING_LITERAL_QUOTATION_MARK;
 #=============================
 class FieldType:
-	def __init__(self, type:type, sqlite3_equivalent:str, args:Dict[str, Any]):
+	def __init__(self, type:type, sqlite3_equivalent:str, args:Dict[str, Any], can_be_auto_incremented=True):
 		self.type = type;
 		self.sqlite3_equivalent = sqlite3_equivalent;
 		self.args = args;
+		self.can_be_auto_incremented = can_be_auto_incremented;
 
 	def generate_sqlite_3_equivalent(self):
 		return f"{self.sqlite3_equivalent}"
@@ -20,13 +22,26 @@ class FieldType:
 		return str(default_value);
 
 
+	def does_type_match(self, instance_of_that_type:Any)->bool:
+		return isinstance(instance_of_that_type , self.type.__class__);
+
+
+	def generate_literal(self, value:Any)->str:
+		return str(value);
+
+
+
 class StringLikeFiledType(FieldType):
 	def __init__(self, type:type, sqlite3_equivalent:str, args:Dict[str, Any]):
-		FieldType.__init__(self, type=type, sqlite3_equivalent=sqlite3_equivalent, args=args);
+		FieldType.__init__(self, type=type, sqlite3_equivalent=sqlite3_equivalent, args=args, can_be_auto_incremented=False);
 
 
 	def generate_default_value_literal(self, default_value:Any)->str:
 		return  f"{SLQM}{default_value}{SLQM}";
+
+
+	def generate_literal(self, value)->str:
+		return SLQM+value+SLQM;
 
 
 
@@ -34,21 +49,33 @@ class IntegerFieldType(FieldType):
 	def __init__(self):
 		FieldType.__init__(self, type=int, sqlite3_equivalent="INTEGER", args=dict());
 
+	def does_type_match(self, instance_of_that_type:Any)->bool:
+		output =  isinstance(instance_of_that_type , int);
+		return output;
+		
+
 
 class TextFieldType(StringLikeFiledType):
 	def __init__(self):
 		StringLikeFiledType.__init__(self, type=str, sqlite3_equivalent="TEXT", args=dict());
+
+	def does_type_match(self, instance_of_that_type:Any)->bool:
+		return isinstance(instance_of_that_type , str);		
 
 
 class FloatFieldType(FieldType):
 	def __init__(self):
 		FieldType.__init__(self, type=float, sqlite3_equivalent="REAL", args=dict());
 
+	def does_type_match(self, instance_of_that_type:Any)->bool:
+		return isinstance(instance_of_that_type , float);		
 
 class BlobFieldType(StringLikeFiledType):
 	def __init__(self):
 		StringLikeFiledType.__init__(self, type=bytes, sqlite3_equivalent="BLOB", args=dict());
 
+	def does_type_match(self, instance_of_that_type:Any)->bool:
+		return isinstance(instance_of_that_type , bytes);		
 #=====
 
 
@@ -70,11 +97,44 @@ class FieldDefinition:
 		self.cant_be_null = cant_be_null;
 		self.has_auto_increment = has_auto_increment;
 
+		self.table_pointer = None;
+
+
+
+	#====
+	#error msgs generation 
+	def emg__1(self):
+		return f"field {self.name} from table {self.table_pointer.name}";
+
 	#=====
 	#checkers
+	def is_default_value_defined(self):
+		return self.default_value != None;
+
+
+	def is_table_definition_pointed(self):
+		return self.table_pointer != None and isinstance(table_pointer, TableDefintion);
+
+
+	def can_be_left_un_valued(self):
+		a = (self.cant_be_null == False);
+		b = (self.is_default_value_defined() and self.cant_be_null==True);
+		c = (self.has_auto_increment == True);
+		return (a + b + c) > 0;
+
+
+	def check_for_errors(self):
+		if self.is_default_value_defined():
+			if self.type.does_type_match(self.default_value) == False:
+				raise Exception(self.emg__1() + f" default value's type {type(self.default_value)} does not matches the given type {self.type.type}");
+
 
 	#=====
 	#generators
+	def generate_literal(self, value:Any)->str:
+		return self.type.generate_literal(value=value);
+
+
 	def generate_sqlite_3_equivalent(self)->str:
 		output = f"{SLQM}{self.name}{SLQM}";
 		output += " ";
@@ -84,7 +144,7 @@ class FieldDefinition:
 			output += "NOT NULL ";
 		if self.default_value != None:
 			output += "DEFAULT "
-			output += self.type.generate_default_value_literal(default_value=self.default_value);
+			output += self.generate_literal(value=self.default_value);
 			output += " ";
 		if self.is_unique == True:
 			output += " ";
@@ -103,6 +163,17 @@ class TableDefintion:
 	def __init__(self, name, fields:List[FieldDefinition]):
 		self.name = name;
 		self.fields = fields;
+		self.fields_name_map = dict();
+
+		for i1 in self.fields:
+			self.fields_name_map[i1.name] = i1;
+
+		for index in range(self.fields.__len__()):
+			self.fields[index].table_pointer = self;
+
+		for index in range(self.fields.__len__()):
+			self.fields[index].check_for_errors();
+
 
 	#counters
 	def count_fields(self):
@@ -170,8 +241,13 @@ class TableDefintion:
 				output.append(i1);
 		return output;
 
+
+	def return_field_by_name(self, name)->FieldDefinition:
+		return self.fields_name_map[name];
+
 	#======
-	def return_end_of_defintion_statement(self):
+	#creation command generator
+	def return_end_of_creation_defintion_statement(self):
 		output = str();
 		if self.has_at_least_one_field_which_is_pk() == True:
 			output += "PRIMARY KEY ("
@@ -194,7 +270,7 @@ class TableDefintion:
 		return output;
 
 
-	def generate_command(self)->str:
+	def generate_creation_command(self)->str:
 		self.check_and_raise_errors();
 		output = str();
 		output += f"CREATE TABLE {SLQM}{self.name}{SLQM}";
@@ -205,10 +281,100 @@ class TableDefintion:
 			output += [",",","][field_count == index+1];
 			output += "\n"
 
-		output += "\t"+self.return_end_of_defintion_statement();
+		output += "\t"+self.return_end_of_creation_defintion_statement();
 		output += "\n";
 		output += ")";
+		output += ";";
 		return output;
+
+	#=========
+	#select command generator
+	def check_for_errors_of_given_values_for_insertion(self, given_values:Dict[str, Any])->None:
+		for index, current_field in enumerate(self.fields):
+			"""
+			errors that can happen:
+				+a field is missing while the field definition cant handle missing value (no allowed to be null or not having a default value)
+
+				+given value has a mismatch with in type with field definition's type
+
+			"""
+			name_of_current_field = current_field.name;
+			if name_of_current_field not in given_values:
+				can_be_left_unvalued = current_field.can_be_left_un_valued();
+
+				if can_be_left_unvalued:
+					continue;
+
+				elif can_be_left_unvalued== False:
+					raise Exception(f"when inserting into table '{self.name}', a necessary filed '{name_of_current_field}' was missing from the given values");
+
+
+
+			current_given_value = given_values[name_of_current_field];
+			if current_field.type.does_type_match(current_given_value) == False:
+				raise Exception(f"when inserting into table '{self.name}', a given value for field'{name_of_current_field}' has incompatible type; expected to be '{current_field.type.type} but was '{current_given_value.__class__}'");
+
+
+
+
+
+	def generate__insertion_command(self, values:Dict[str, Any]):
+		self.check_for_errors_of_given_values_for_insertion(given_values=values)
+		output = f"INSERT INTO {self.name} ";
+		requested_columns = "(";
+		valueing_columns = "("
+
+		number_of_given_values = len(values);
+
+		for index, i1 in enumerate(values.items()):
+			field_name, given_value  = i1;
+
+			related_field = self.return_field_by_name(name=field_name);
+
+			requested_columns += f"{field_name}";
+			valueing_columns += related_field.generate_literal(given_value);
+
+			if index+1 == number_of_given_values:
+				pass
+
+			elif index+1 != number_of_given_values:
+				requested_columns += ",";
+				valueing_columns += ",";
+
+		requested_columns += ")";
+		valueing_columns += ")"
+
+		output = output + requested_columns + " VALUES " + valueing_columns;
+		output += ";"
+		return output;
+
+
+	def check_given_field_names_and_desired_values(self, given_names_and_values:Dict[str, Any])->None:
+		"""
+		things that can go wrong:
+			+a field which does not exist
+			+a comparison value which is not same type as field definition
+		"""
+		for given_field_name, given_field_value in given_names_and_values.items():
+			related_field = self.return_field_by_name(name=given_field_name)
+			given_field_exists_in_definition_of_table = related_field != None
+			if given_field_exists_in_definition_of_table == False:
+				raise Exception(f"cant select rows of table '{self.name}' by field '{given_field_name}' which does not exist in table definition");
+
+			if given_field_exists_in_definition_of_table == True:
+				does_type_match = related_field.does_type_match(given_field_value);
+				if does_type_match == False:
+					raise Exception(f"type mismatch for field '{related_field.name}' from table '{self.name}' where type {related_field.type.__class__} was expected but {given_value.__class__} was given")
+
+
+
+	def generate_selection_by_rigid_equlity_of_fields(self **fieldnames_and_desired_values)->str:
+		self.check_given_field_names_and_desired_values(given_names_and_values=fieldnames_and_desired_values);
+		output = f"SELECT * FROM {self.name} WHERE "
+
+
+
+			
 		
 
 #==============================
@@ -219,10 +385,10 @@ class RowField:
 
 
 class QuerySelectOutput:
-	def __init__(self, callback_id:str, output:List[TableRow], execution_time:float):
-		self.callback_id = callback_id;
-		self.output = output;
-		self.execution_time = execution_time;
+	def __init__(self):
+		self.callback_id = None;
+		self.output = None;
+		self.execution_time = None;
 
 
 class TableRow:
@@ -311,12 +477,24 @@ def test_1():
 				is_unique=False,
 				has_auto_increment=False,
 				is_primary_key=False,
-				default_value=0,
+				default_value=5,
 				),	
+
+
+			FieldDefinition(
+				name="caption",
+				type=TextFieldType(),
+				cant_be_null=True,
+				is_unique=False,
+				has_auto_increment=False,
+				is_primary_key=False,
+				default_value="no caption :)",
+				),				
 			],
 		);
 
-	print(a.generate_command());
+	print(a.generate_creation_command());
+	print(a.generate__insertion_command(values={"user_name":"asd", "password":"asd", "credit":1654}))
 
 
 test_1();
